@@ -1,0 +1,188 @@
+name: Build DEX
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:   # можно запустить вручную кнопкой на GitHub
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Скачиваем код репозитория
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Ставим Java 17
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # 3. Ставим Android SDK
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 4. Генерируем заглушку telegram-stub.jar
+      #    (нужна только для компиляции — в рантайме классы уже есть в Exteragram)
+      - name: Generate Telegram stub jar
+        run: |
+          mkdir -p app/libs stub_src/org/telegram/{messenger,tgnet,ui/{ActionBar,Components}}
+          mkdir -p stub_src/org/telegram/ui
+
+          # Минимальные заглушки нужных классов
+          cat > stub_src/org/telegram/messenger/AndroidUtilities.java << 'EOF'
+          package org.telegram.messenger;
+          import android.os.Handler;
+          import android.os.Looper;
+          public class AndroidUtilities {
+              public static int dp(float value) { return (int)(value * 3); }
+              public static android.graphics.Typeface bold() { return android.graphics.Typeface.DEFAULT_BOLD; }
+              public static void runOnUIThread(Runnable r) { new Handler(Looper.getMainLooper()).post(r); }
+          }
+          EOF
+
+          cat > stub_src/org/telegram/messenger/ApplicationLoader.java << 'EOF'
+          package org.telegram.messenger;
+          import android.content.Context;
+          public class ApplicationLoader {
+              public static Context applicationContext;
+          }
+          EOF
+
+          cat > stub_src/org/telegram/messenger/MessageObject.java << 'EOF'
+          package org.telegram.messenger;
+          import org.telegram.tgnet.TLRPC;
+          public class MessageObject {
+              public TLRPC.Message messageOwner;
+              public String fullName;
+              public boolean isOut() { return false; }
+          }
+          EOF
+
+          cat > stub_src/org/telegram/messenger/NotificationCenter.java << 'EOF'
+          package org.telegram.messenger;
+          public class NotificationCenter {
+              public static final int didReceiveNewMessages = 1;
+              public static final int messagesDeleted = 2;
+              public static NotificationCenter getInstance(int account) { return new NotificationCenter(); }
+              public void addObserver(NotificationCenterDelegate d, int id) {}
+              public void removeObserver(NotificationCenterDelegate d, int id) {}
+              public interface NotificationCenterDelegate {
+                  void didReceivedNotification(int id, int account, Object... args);
+              }
+          }
+          EOF
+
+          cat > stub_src/org/telegram/messenger/UserConfig.java << 'EOF'
+          package org.telegram.messenger;
+          public class UserConfig {
+              public static int selectedAccount = 0;
+          }
+          EOF
+
+          cat > stub_src/org/telegram/tgnet/TLRPC.java << 'EOF'
+          package org.telegram.tgnet;
+          public class TLRPC {
+              public static class Message {
+                  public int id; public String message; public boolean out;
+                  public int date; public Peer peer_id; public MessageMedia media;
+                  public Peer from_id;
+              }
+              public static class Peer { public long user_id, chat_id, channel_id; }
+              public static class MessageMedia {}
+              public static class TL_messageMediaPhoto extends MessageMedia { public Photo photo; }
+              public static class TL_messageMediaDocument extends MessageMedia { public Document document; }
+              public static class TL_messageMediaGeo extends MessageMedia {}
+              public static class TL_messageMediaContact extends MessageMedia {}
+              public static class TL_messageMediaPoll extends MessageMedia {}
+              public static class TL_messageMediaDice extends MessageMedia {}
+              public static class Photo {}
+              public static class Document { public String mime_type; }
+          }
+          EOF
+
+          cat > stub_src/org/telegram/ui/ActionBar/BaseFragment.java << 'EOF'
+          package org.telegram.ui.ActionBar;
+          import android.app.Activity;
+          public class BaseFragment {
+              public Activity getParentActivity() { return null; }
+          }
+          EOF
+
+          cat > stub_src/org/telegram/ui/ActionBar/BottomSheet.java << 'EOF'
+          package org.telegram.ui.ActionBar;
+          import android.content.Context; import android.view.View;
+          public class BottomSheet {
+              public void show() {} public void dismiss() {}
+              public static class Builder {
+                  public Builder(Context c) {}
+                  public void setApplyTopPadding(boolean v) {}
+                  public void setApplyBottomPadding(boolean v) {}
+                  public void setCustomView(View v) {}
+                  public BottomSheet create() { return new BottomSheet(); }
+              }
+          }
+          EOF
+
+          cat > stub_src/org/telegram/ui/ActionBar/Theme.java << 'EOF'
+          package org.telegram.ui.ActionBar;
+          public class Theme {
+              public static final String key_dialogTextBlack = "dialogTextBlack";
+              public static final String key_dialogTextGray2 = "dialogTextGray2";
+              public static final String key_divider = "divider";
+              public static final String key_windowBackgroundGray = "windowBackgroundGray";
+              public static final String key_text_RedRegular = "text_RedRegular";
+              public static int getColor(String key) { return 0; }
+          }
+          EOF
+
+          cat > stub_src/org/telegram/ui/Components/LayoutHelper.java << 'EOF'
+          package org.telegram.ui.Components;
+          import android.widget.LinearLayout;
+          public class LayoutHelper {
+              public static LinearLayout.LayoutParams createLinear(int w, int h) {
+                  return new LinearLayout.LayoutParams(w, h);
+              }
+              public static LinearLayout.LayoutParams createLinear(int w, int h, float weight) {
+                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(w, h); p.weight = weight; return p;
+              }
+              public static LinearLayout.LayoutParams createLinear(int w, int h, int l, int t, int r, int b) {
+                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(w, h);
+                  p.setMargins(l,t,r,b); return p;
+              }
+          }
+          EOF
+
+          # Компилируем заглушки
+          find stub_src -name "*.java" > stub_sources.txt
+          javac -source 17 -target 17 -d stub_classes @stub_sources.txt 2>/dev/null || true
+          jar cf app/libs/telegram-stub.jar -C stub_classes . 2>/dev/null || true
+          echo "✅ Stub jar created"
+
+      # 5. Даём права Gradle и собираем
+      - name: Build with Gradle
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease extractDex --no-daemon
+
+      # 6. Создаём actual.json с версией
+      - name: Generate actual.json
+        run: |
+          VERSION=$(grep "VERSION_CODE" app/src/main/java/ni/deleted/messages/Main.kt | grep -o '[0-9]*' | head -1)
+          TAG="v${VERSION}"
+          REPO="${{ github.repository }}"
+          URL="https://github.com/${REPO}/raw/main/outputs/deleted-messages.dex"
+          echo "{\"latest\":{\"code\":${VERSION},\"link\":\"${URL}\"}}" > outputs/actual.json
+          echo "Version: $VERSION  URL: $URL"
+
+      # 7. Коммитим .dex и actual.json обратно в репозиторий
+      - name: Commit outputs
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add outputs/
+          git diff --cached --quiet || git commit -m "🤖 Build DEX [skip ci]"
+          git push
